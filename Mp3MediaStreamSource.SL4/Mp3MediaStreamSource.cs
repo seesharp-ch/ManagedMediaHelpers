@@ -93,6 +93,8 @@ namespace Media
         /// </summary>
         private MpegFrame currentFrame;
 
+        private int _offset;
+
         /// <summary>
         /// Initializes a new instance of the Mp3MediaStreamSource class.
         /// </summary>
@@ -143,9 +145,10 @@ namespace Media
 
             // Read and (throw out) any Id3 data if present. 
             byte[] data = new byte[10];
-            if (this.audioStream.Read(data, 0, 3) != 3)
+            int readCount = 0;
+            while (readCount != 3)
             {
-                goto cleanup;
+                readCount = this.audioStream.Read(data, readCount, 3-readCount);
             }
 
             if (data[0] == 73 /* I */ &&
@@ -153,10 +156,12 @@ namespace Media
                 data[2] == 51 /* 3 */)
             {
                 // Need to update to read the is footer present flag and account for its 10 bytes if needed.
-                if (this.audioStream.Read(data, 3, 7) != 7)
+                readCount = 0;
+                while (readCount != 7)
                 {
-                    goto cleanup;
+                    readCount = this.audioStream.Read(data, 3 + readCount, 7 - readCount);
                 }
+
 
                 int id3Size = BitTools.ConvertSyncSafeToInt32(data, 6);
                 int bytesRead = 0;
@@ -181,9 +186,10 @@ namespace Media
             {
                 // No ID3 tag present, presumably this is streaming and we are starting right at the Mp3 data.
                 // Assume the stream isn't seekable.
-                if (this.audioStream.Read(data, 3, 1) != 1)
+                readCount = 0;
+                while (readCount != 1)
                 {
-                    goto cleanup;
+                    readCount = this.audioStream.Read(data, 3, 1);
                 }
 
                 mpegFrame = new MpegFrame(this.audioStream, data);
@@ -192,9 +198,10 @@ namespace Media
 
             return null;
 
-            // Cleanup and quit if you couldn't even read the initial data for some reason.
-        cleanup:
-            throw new Exception("Could not read intial audio stream data");
+            // Note : shouldn't be handled that way since on slow link, we might have only partial information and the rest will come afterwards. use timeouts instead of one-shot reads - SalFab
+            //    // Cleanup and quit if you couldn't even read the initial data for some reason.
+            //cleanup:
+            //    throw new Exception("Could not read intial audio stream data");
         }
 
         /// <summary>
@@ -271,57 +278,70 @@ namespace Media
         /// </param>
         protected override void GetSampleAsync(MediaStreamType mediaStreamType)
         {
-            Dictionary<MediaSampleAttributeKeys, string> emptyDict = new Dictionary<MediaSampleAttributeKeys, string>();
-            MediaStreamSample audioSample = null;
 
-            if (this.currentFrame != null)
-            {
-                // Calculate our current position
-                double ratio = (double)this.currentFrameStartPosition / (double)this.audioStreamLength;
-                TimeSpan currentPosition = new TimeSpan((long)(this.trackDuration.Ticks * ratio));
+                                     Dictionary<MediaSampleAttributeKeys, string> emptyDict = new Dictionary<MediaSampleAttributeKeys, string>();
+                                     MediaStreamSample audioSample = null;
 
-                // Create a MemoryStream to hold the bytes
-                // FrameSize includes the frame header which we've already read from the previous iteration, so just copy the
-                // header, and then read the remaining bytes
-                this.currentFrame.CopyHeader(buffer);
-                int audioSampleSize = this.currentFrame.FrameSize - MpegFrame.FrameHeaderSize;
-                int c = this.audioStream.Read(buffer, MpegFrame.FrameHeaderSize, audioSampleSize);
-                if (c != audioSampleSize)
-                {
-                    // Ran out of bytes trying to read MP3 frame.
-                    this.currentFrame = null;
-                    audioSample = new MediaStreamSample(this.audioStreamDescription, null, 0, 0, 0, emptyDict);
-                    this.ReportGetSampleCompleted(audioSample);
-                    return;
-                }
+                                     if (this.currentFrame != null)
+                                     {
+                                         // Calculate our current position
+                                         double ratio = (double)this.currentFrameStartPosition / (double)this.audioStreamLength;
+                                         TimeSpan currentPosition = new TimeSpan((long)(this.trackDuration.Ticks * ratio));
 
-                this.currentFrameStartPosition += c;
-                using (MemoryStream audioFrameStream = new MemoryStream(buffer))
-                {
-                    // Return the next sample in the stream
-                    audioSample = new MediaStreamSample(this.audioStreamDescription, audioFrameStream, 0, this.currentFrame.FrameSize, currentPosition.Ticks, emptyDict);
-                    this.ReportGetSampleCompleted(audioSample);
+                                         // Create a MemoryStream to hold the bytes
+                                         // FrameSize includes the frame header which we've already read from the previous iteration, so just copy the
+                                         // header, and then read the remaining bytes
+                                         this.currentFrame.CopyHeader(buffer);
+                                         int audioSampleSize = this.currentFrame.FrameSize - MpegFrame.FrameHeaderSize - _offset;
 
-                    // Grab the next frame
-                    MpegFrame nextFrame = new MpegFrame(this.audioStream);
-                    if (nextFrame.Version == 1 && nextFrame.Layer == 3)
-                    {
-                        this.currentFrameStartPosition += MpegFrame.FrameHeaderSize;
-                        this.currentFrame = nextFrame;
-                    }
-                    else
-                    {
-                        this.currentFrame = null;
-                    }
-                }
-            }
-            else
-            {
-                // We're near the end of the file, or we got an irrecoverable error.
-                // Return a null stream which tells the MediaStreamSource & MediaElement to shut down
-                audioSample = new MediaStreamSample(this.audioStreamDescription, null, 0, 0, 0, emptyDict);
-                this.ReportGetSampleCompleted(audioSample);
-            }
+
+
+                                         int c = this.audioStream.Read(buffer, MpegFrame.FrameHeaderSize + _offset, audioSampleSize);
+                                         _offset += c;
+                                         this.currentFrameStartPosition += c;
+                                         if (c != audioSampleSize)
+                                         {
+                                             this.ReportGetSampleProgress((double)_offset / (double)(this.currentFrame.FrameSize - MpegFrame.FrameHeaderSize));
+                                             GetSampleAsync(mediaStreamType);
+                                             return;
+                                             // FIXME : This is wrong : we should be using ReportGetSampleProgress ! - Salfab
+                                             //// Ran out of bytes trying to read MP3 frame.
+                                             //this.currentFrame = null;
+                                             //audioSample = new MediaStreamSample(this.audioStreamDescription, null, 0, 0, 0, emptyDict);
+                                             //this.ReportGetSampleCompleted(audioSample);
+                                             //return;
+                                         }
+
+                                         using (MemoryStream audioFrameStream = new MemoryStream(buffer))
+                                         {
+                                             // Return the next sample in the stream
+                                             audioSample = new MediaStreamSample(this.audioStreamDescription, audioFrameStream, 0, this.currentFrame.FrameSize, currentPosition.Ticks, emptyDict);
+                                             this.ReportGetSampleCompleted(audioSample);
+                                             _offset = 0;
+
+                                             // Grab the next frame
+                                             MpegFrame nextFrame = new MpegFrame(this.audioStream);
+                                             if (nextFrame.Version == 1 && nextFrame.Layer == 3)
+                                             {
+                                                 this.currentFrameStartPosition += MpegFrame.FrameHeaderSize;
+                                                 this.currentFrame = nextFrame;
+                                             }
+                                             else
+                                             {
+                                                 this.currentFrame = null;
+                                             }
+                                         }
+
+                                     }
+                                     else
+                                     {
+                                         // We're near the end of the file, or we got an irrecoverable error.
+                                         // Return a null stream which tells the MediaStreamSource & MediaElement to shut down
+                                         audioSample = new MediaStreamSample(this.audioStreamDescription, null, 0, 0, 0, emptyDict);
+                                         this.ReportGetSampleCompleted(audioSample);
+                                         _offset = 0;
+                                     }
+
         }
 
         /// <summary>
