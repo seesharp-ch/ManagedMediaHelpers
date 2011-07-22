@@ -148,7 +148,12 @@ namespace MediaParsers
             else
             {
                 // Guard against a read error
-                if (stream.Read(this.frameHeader, 0, FrameHeaderSize) != FrameHeaderSize)
+                int readCount = 0;
+                while (readCount < FrameHeaderSize)
+                {
+                    readCount += stream.Read(this.frameHeader, readCount, FrameHeaderSize);
+                }
+                if (readCount != FrameHeaderSize)
                 {
                     goto cleanup;
                 }
