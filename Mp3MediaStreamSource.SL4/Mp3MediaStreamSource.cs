@@ -250,6 +250,8 @@ namespace Media
                                          this.currentFrameStartPosition += c;
                                          if (c != audioSampleSize)
                                          {
+                                             // Throttle sample construction. Somehow it seems to avoid connection loss with the debugger and unexpected application (UI Thread) exit... 
+                                             Thread.Sleep(10);
                                              this.ReportGetSampleProgress((double)_offset / (double)(this.currentFrame.FrameSize - MpegFrame.FrameHeaderSize));
                                              GetSampleAsync(mediaStreamType);
                                              return;
